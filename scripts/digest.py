@@ -17,7 +17,18 @@ log = logging.getLogger(__name__)
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-TOP_N = 5
+
+DAILY_CAP   = 3   # 일간 핫 논문
+WEEKLY_CAP  = 2   # 주간 핫 논문
+MONTHLY_CAP = 1   # 월간 핫 논문
+TOP_N = DAILY_CAP + WEEKLY_CAP + MONTHLY_CAP  # = 6
+
+WINDOW_LABEL = {
+    "daily":   "📅 일간",
+    "weekly":  "📆 주간",
+    "monthly": "🗓️ 월간",
+    "arxiv":   "🔬 ArXiv",
+}
 
 NLP_KEYWORDS = {
     # 핵심 모델 / 아키텍처
@@ -55,24 +66,15 @@ def is_nlp_related(title: str, tags: list[str] | None = None) -> bool:
 # 1. 데이터 수집
 # ──────────────────────────────────────────────
 
-def fetch_hf_papers() -> tuple[list[dict], dict[str, int]]:
-    """HuggingFace 전날 데일리 페이퍼 + arxiv_id→upvotes 맵을 반환합니다.
-
-    전날(UTC) 페이퍼를 사용하는 이유:
-    스크립트는 00:00 UTC에 실행되는데, 당일 페이퍼는 방금 올라와
-    업보트가 거의 없다. 전날 페이퍼는 하루 치 업보트가 쌓여 있어
-    실제 화제도를 반영한다.
-    """
-    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-    log.info("HuggingFace 페이퍼 수집 중... (날짜: %s)", yesterday)
+def _fetch_hf_day(date_str: str) -> tuple[list[dict], dict[str, int]]:
+    """특정 날짜의 HF papers를 수집합니다 (내부 함수)."""
     papers: list[dict] = []
-    hf_upvotes: dict[str, int] = {}  # arxiv_id → upvotes (ArXiv 교차참조용)
+    upvotes: dict[str, int] = {}
 
-    # ── API 시도 ──────────────────────────────
     try:
         resp = requests.get(
             "https://huggingface.co/api/daily_papers",
-            params={"date": yesterday},
+            params={"date": date_str},
             headers={"User-Agent": "nlp-digest/1.0"},
             timeout=15,
         )
@@ -82,36 +84,33 @@ def fetch_hf_papers() -> tuple[list[dict], dict[str, int]]:
                 title = p.get("title", "").strip()
                 arxiv_id = p.get("id", "")
                 tags = [t.get("id", "") for t in p.get("tags", [])]
-                upvotes = p.get("upvotes", 0) + item.get("numComments", 0)
+                score = p.get("upvotes", 0) + item.get("numComments", 0)
                 if arxiv_id:
-                    hf_upvotes[arxiv_id] = upvotes  # 전체 저장 (NLP 필터 무관)
+                    upvotes[arxiv_id] = score
                 if title and is_nlp_related(title, tags):
                     papers.append({
                         "title": title,
                         "url": f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else "",
                         "source_url": f"https://huggingface.co/papers/{arxiv_id}" if arxiv_id else "",
                         "arxiv_id": arxiv_id,
-                        "score": upvotes,
+                        "score": score,
                         "source": "HuggingFace",
                         "abstract": p.get("summary", ""),
                     })
     except Exception as exc:
-        log.warning("HF API 실패: %s", exc)
+        log.warning("HF API 실패 (%s): %s", date_str, exc)
 
-    # ── HTML 폴백 ─────────────────────────────
     if not papers:
         try:
             resp = requests.get(
-                f"https://huggingface.co/papers?date={yesterday}",
+                f"https://huggingface.co/papers?date={date_str}",
                 headers={"User-Agent": "Mozilla/5.0 (compatible; nlp-digest/1.0)"},
                 timeout=15,
             )
             soup = BeautifulSoup(resp.text, "html.parser")
-
             for a_tag in soup.select("a[href*='/papers/']"):
                 href = a_tag.get("href", "")
                 arxiv_id = href.split("/")[-1]
-                # /papers/ 페이지 링크만 (분류 링크 제외)
                 if not re.match(r"^\d{4}\.\d{4,}", arxiv_id):
                     continue
                 title = a_tag.get_text(strip=True)
@@ -127,10 +126,39 @@ def fetch_hf_papers() -> tuple[list[dict], dict[str, int]]:
                     "abstract": "",
                 })
         except Exception as exc:
-            log.warning("HF HTML 파싱 실패: %s", exc)
+            log.warning("HF HTML 실패 (%s): %s", date_str, exc)
 
-    log.info("HuggingFace 페이퍼 %d건 수집 / upvotes 맵 %d건", len(papers), len(hf_upvotes))
-    return papers, hf_upvotes
+    return papers, upvotes
+
+
+def fetch_hf_daily() -> tuple[list[dict], dict[str, int]]:
+    """어제 HF papers (일간 핫 논문)."""
+    d = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    log.info("HF 일간 수집 (%s)...", d)
+    papers, upvotes = _fetch_hf_day(d)
+    papers.sort(key=lambda x: x["score"], reverse=True)
+    log.info("HF 일간 %d건", len(papers))
+    return papers, upvotes
+
+
+def fetch_hf_range(start: date, end: date, step_days: int = 1) -> tuple[list[dict], dict[str, int]]:
+    """날짜 범위의 HF papers를 집계합니다 (주간/월간용)."""
+    best: dict[str, dict] = {}   # arxiv_id → 최고 upvotes 논문
+    all_upvotes: dict[str, int] = {}
+
+    current = start
+    while current <= end:
+        papers, upvotes = _fetch_hf_day(current.strftime("%Y-%m-%d"))
+        all_upvotes.update(upvotes)
+        for p in papers:
+            key = p["arxiv_id"] or p["title"]
+            if key not in best or p["score"] > best[key]["score"]:
+                best[key] = p
+        current += timedelta(days=step_days)
+        time.sleep(0.3)
+
+    result = sorted(best.values(), key=lambda x: x["score"], reverse=True)
+    return result, all_upvotes
 
 
 ARXIV_NS = "{http://www.w3.org/2005/Atom}"
@@ -208,29 +236,36 @@ def fetch_arxiv_papers(hf_upvotes: dict[str, int] | None = None) -> list[dict]:
 # 2. 병합 및 중복 제거
 # ──────────────────────────────────────────────
 
-HF_CAP = 3  # HF 페이퍼 최대 선택 수 (나머지는 PWC로 채움)
-
-def merge_papers(hf: list[dict], arxiv: list[dict], n: int = TOP_N) -> list[dict]:
+def merge_papers(
+    daily: list[dict],
+    weekly: list[dict],
+    monthly: list[dict],
+    arxiv: list[dict],
+) -> list[dict]:
     seen: set[str] = set()
     result: list[dict] = []
 
-    # HF 큐레이션 최대 HF_CAP건 우선
-    for p in hf:
-        if len(result) >= HF_CAP:
-            break
-        key = p["arxiv_id"] or p["title"]
-        if key not in seen:
-            seen.add(key)
-            result.append(p)
+    def _fill(pool: list[dict], cap: int, window: str) -> None:
+        count = 0
+        for p in pool:
+            if count >= cap:
+                break
+            key = p["arxiv_id"] or p["title"]
+            if key not in seen:
+                seen.add(key)
+                p["window"] = window
+                result.append(p)
+                count += 1
 
-    # 나머지 슬롯은 ArXiv 최신 논문으로 보충
-    for p in arxiv:
-        if len(result) >= n:
-            break
-        key = p["arxiv_id"] or p["title"]
-        if key not in seen:
-            seen.add(key)
-            result.append(p)
+    _fill(daily,   DAILY_CAP,   "daily")
+    _fill(weekly,  WEEKLY_CAP,  "weekly")
+    _fill(monthly, MONTHLY_CAP, "monthly")
+
+    # 각 버킷이 부족할 경우 ArXiv로 보충
+    remaining = TOP_N - len(result)
+    if remaining > 0:
+        log.info("ArXiv로 %d건 보충", remaining)
+        _fill(arxiv, remaining, "arxiv")
 
     return result
 
@@ -338,8 +373,9 @@ def send_to_discord(papers: list[dict]) -> None:
         source_url = p.get("source_url", "")
         source = p.get("source", "")
 
+        window_tag = WINDOW_LABEL.get(p.get("window", ""), "")
         lines = [
-            f"**{i}. {title}**",
+            f"**{i}. {title}** `{window_tag}`",
             f"🇺🇸 {p['en']}",
             f"🇰🇷 {p['ko']}",
         ]
@@ -368,15 +404,41 @@ def send_to_discord(papers: list[dict]) -> None:
 # ──────────────────────────────────────────────
 
 def main() -> None:
-    hf_papers, hf_upvotes = fetch_hf_papers()
-    arxiv_papers = fetch_arxiv_papers(hf_upvotes)
-    papers = merge_papers(hf_papers, arxiv_papers, n=TOP_N)
+    today = date.today()
+
+    # ── 일간: 어제 (하루 치 업보트 누적) ─────
+    daily_papers, daily_upvotes = fetch_hf_daily()
+
+    # ── 주간: 2~8일 전 (7일간) ──────────────
+    week_end   = today - timedelta(days=2)
+    week_start = today - timedelta(days=8)
+    log.info("HF 주간 수집 (%s ~ %s)...", week_start, week_end)
+    weekly_papers, weekly_upvotes = fetch_hf_range(week_start, week_end)
+    log.info("HF 주간 %d건", len(weekly_papers))
+
+    # ── 월간: 9~30일 전 (3일 간격 샘플링) ───
+    month_end   = today - timedelta(days=9)
+    month_start = today - timedelta(days=30)
+    log.info("HF 월간 수집 (%s ~ %s, 3일 간격)...", month_start, month_end)
+    monthly_papers, monthly_upvotes = fetch_hf_range(month_start, month_end, step_days=3)
+    log.info("HF 월간 %d건", len(monthly_papers))
+
+    # ArXiv upvotes 맵 통합 (일간 → 주간 → 월간 순으로 덮어쓰기)
+    combined_upvotes = {**monthly_upvotes, **weekly_upvotes, **daily_upvotes}
+    arxiv_papers = fetch_arxiv_papers(combined_upvotes)
+
+    papers = merge_papers(daily_papers, weekly_papers, monthly_papers, arxiv_papers)
 
     if not papers:
         log.error("수집된 페이퍼가 없습니다. 종료합니다.")
         return
 
-    log.info("최종 선정 페이퍼 %d건", len(papers))
+    log.info("최종 선정 페이퍼 %d건 (일간 %d / 주간 %d / 월간 %d)",
+             len(papers),
+             sum(1 for p in papers if p.get("window") == "daily"),
+             sum(1 for p in papers if p.get("window") == "weekly"),
+             sum(1 for p in papers if p.get("window") == "monthly"))
+
     papers = summarize_papers(papers)
     send_to_discord(papers)
     log.info("완료!")
