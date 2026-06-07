@@ -383,7 +383,8 @@ def send_to_discord(papers: list[dict]) -> None:
         window_tag = WINDOW_LABEL.get(p.get("window", ""), "")
         score_tag = f" 🔺{p['score']}" if p.get("source") == "HuggingFace" and p.get("score", 0) > 0 else ""
         lines = [
-            f"**{i}. {title}** `{window_tag}`{score_tag}",
+            f"## {i}. {title}",
+            f"`{window_tag}`{score_tag}",
             f"🇺🇸 {p['en']}",
             f"🇰🇷 {p['ko']}",
         ]
