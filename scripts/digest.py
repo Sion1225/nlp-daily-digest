@@ -67,6 +67,7 @@ def fetch_hf_papers() -> list[dict]:
                     papers.append({
                         "title": title,
                         "url": f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else "",
+                        "source_url": f"https://huggingface.co/papers/{arxiv_id}" if arxiv_id else "",
                         "arxiv_id": arxiv_id,
                         "score": upvotes,
                         "source": "HuggingFace",
@@ -97,6 +98,7 @@ def fetch_hf_papers() -> list[dict]:
                 papers.append({
                     "title": title,
                     "url": f"https://arxiv.org/abs/{arxiv_id}",
+                    "source_url": f"https://huggingface.co/papers/{arxiv_id}",
                     "arxiv_id": arxiv_id,
                     "score": 0,
                     "source": "HuggingFace",
@@ -142,6 +144,7 @@ def fetch_reddit_papers() -> list[dict]:
                 papers.append({
                     "title": title,
                     "url": f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else url,
+                    "source_url": f"https://www.reddit.com{p.get('permalink', '')}",
                     "arxiv_id": arxiv_id,
                     "score": score,
                     "source": f"r/{sub}",
@@ -209,6 +212,7 @@ def summarize_papers(papers: list[dict]) -> list[dict]:
 
     for paper in papers:
         abstract = paper.get("abstract") or fetch_abstract(paper["arxiv_id"])
+        paper["abstract"] = abstract  # build_message에서 재사용
         abstract_block = f"Abstract: {abstract[:800]}" if abstract else ""
 
         prompt = (
@@ -249,13 +253,28 @@ def build_message(papers: list[dict]) -> str:
         title = p["title"]
         if len(title) > 110:
             title = title[:110] + "…"
-        lines += [
+
+        abstract = p.get("abstract", "")
+        if abstract:
+            abstract_preview = abstract[:220] + ("…" if len(abstract) > 220 else "")
+            abstract_line = f"> :notepad_spiral: {abstract_preview}"
+        else:
+            abstract_line = None
+
+        paper_link = f"[논문 (ArXiv)]({p['url']})" if p.get("url") else ""
+        source_link = f"[{p['source']}]({p['source_url']})" if p.get("source_url") else p['source']
+        link_line = f"> {paper_link}  |  출처: {source_link}"
+
+        block = [
             f"**{i}. {title}**",
             f"> :flag_us: {p['en']}",
             f"> :flag_kr: {p['ko']}",
-            f"> [{p['source']}]({p['url']})",
-            "",
         ]
+        if abstract_line:
+            block.append(abstract_line)
+        block += [link_line, ""]
+        lines += block
+
     return "\n".join(lines)
 
 
