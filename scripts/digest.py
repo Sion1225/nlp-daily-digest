@@ -3,6 +3,7 @@
 
 import os
 import re
+import json
 import logging
 import requests
 from datetime import date
@@ -224,9 +225,12 @@ def summarize_papers(papers: list[dict]) -> list[dict]:
 
         try:
             response = model.generate_content(prompt)
+            raw = response.text.strip()
+            log.info("Gemini 응답 ('%s'):\n%s", paper["title"][:40], raw[:600])
+
             en, ko, detail_parts = "", "", []
             current = None
-            for line in response.text.strip().splitlines():
+            for line in raw.splitlines():
                 if line.startswith("EN:"):
                     current = "en"
                     en = line[3:].strip()
@@ -241,6 +245,7 @@ def summarize_papers(papers: list[dict]) -> list[dict]:
             paper["en"] = en or paper["title"]
             paper["ko"] = ko or paper["title"]
             paper["detail"] = " ".join(detail_parts)
+            log.info("파싱 결과 — EN: %r | DETAIL 길이: %d자", en[:60], len(paper["detail"]))
         except Exception as exc:
             log.warning("Gemini 요약 실패 ('%s'): %s", paper["title"][:40], exc)
             paper["en"] = paper["title"]
@@ -284,13 +289,14 @@ def build_embeds(papers: list[dict]) -> list[dict]:
 
         embed: dict = {
             "title": f"{i}. {title}",  # 제목 클릭 → ArXiv
-            "url": p.get("url", ""),
             "description": description,
             "color": EMBED_COLOR,
             "fields": [
                 {"name": "출처", "value": source_value, "inline": True},
             ],
         }
+        if p.get("url"):  # url이 없으면 키 자체를 제외 (Discord가 빈 문자열 거부)
+            embed["url"] = p["url"]
         embeds.append(embed)
     return embeds
 
@@ -306,7 +312,13 @@ def send_to_discord(papers: list[dict]) -> None:
         payload: dict = {"embeds": embeds[idx : idx + CHUNK]}
         if idx == 0:
             payload["content"] = f"📚 **NLP Daily Digest — {today}**"
+
+        log.info("Discord 전송 payload (미리보기):\n%s",
+                 json.dumps(payload, ensure_ascii=False)[:800])
+
         resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=15)
+        if not resp.ok:
+            log.error("Discord 오류 %s: %s", resp.status_code, resp.text)
         resp.raise_for_status()
         log.info("Discord embed 전송 완료 (%d개)", len(embeds[idx : idx + CHUNK]))
 
