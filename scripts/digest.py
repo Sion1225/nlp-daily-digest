@@ -361,7 +361,7 @@ def _post(content: str) -> None:
 def send_to_discord(papers: list[dict]) -> None:
     yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    _post(f"📚 **NLP Daily Digest — {yesterday}** ({len(papers)}건)")
+    _post(f"# 📚 NLP Daily Digest — {yesterday}\n{len(papers)}건")
 
     prev_window = None
     for i, p in enumerate(papers, 1):
