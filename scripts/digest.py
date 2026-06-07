@@ -20,15 +20,25 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 TOP_N = 5
 
 NLP_KEYWORDS = {
+    # 핵심 모델 / 아키텍처
     "nlp", "natural language", "language model", "large language", "llm",
-    "transformer", "bert", "gpt", "text generation", "machine translation",
-    "summarization", "question answering", "dialogue", "chatbot", "sentiment",
-    "named entity", "information extraction", "text classification",
-    "speech recognition", "speech synthesis", "tokenization", "embedding",
-    "retrieval augmented", "rag", "instruction tuning", "fine-tuning",
-    "alignment", "rlhf", "prompt", "in-context learning", "few-shot",
-    "zero-shot", "reasoning", "chain of thought", "multimodal language",
-    "vision language", "language understanding", "reading comprehension",
+    "transformer", "bert", "gpt", "pretraining", "pre-training",
+    "sparse attention", "vision-language", "vision language",
+    "multimodal language", "multimodal model", "emergent language",
+    # 태스크
+    "text generation", "machine translation", "translation",
+    "summarization", "question answering", "dialogue", "chatbot",
+    "sentiment", "named entity", "information extraction",
+    "text classification", "speech recognition", "speech synthesis",
+    "reading comprehension", "language understanding",
+    # 학습 패러다임
+    "tokenization", "embedding", "retrieval augmented", "rag",
+    "instruction tuning", "fine-tuning", "alignment", "rlhf",
+    "prompt", "in-context", "few-shot", "zero-shot",
+    "reasoning", "chain of thought",
+    # 코퍼스 / 데이터
+    "text corpus", "text corpora", "corpora", "parallel corpus",
+    "language corpus", "linguistic",
 }
 
 ARXIV_RE = re.compile(r"arxiv\.org/abs/([\d.]+v?\d*)")
@@ -45,10 +55,11 @@ def is_nlp_related(title: str, tags: list[str] | None = None) -> bool:
 # 1. 데이터 수집
 # ──────────────────────────────────────────────
 
-def fetch_hf_papers() -> list[dict]:
-    """HuggingFace 데일리 페이퍼를 수집합니다 (API → HTML 폴백)."""
+def fetch_hf_papers() -> tuple[list[dict], dict[str, int]]:
+    """HuggingFace 데일리 페이퍼 + arxiv_id→upvotes 맵을 반환합니다."""
     log.info("HuggingFace 페이퍼 수집 중...")
     papers: list[dict] = []
+    hf_upvotes: dict[str, int] = {}  # arxiv_id → upvotes (ArXiv 교차참조용)
 
     # ── API 시도 ──────────────────────────────
     try:
@@ -64,6 +75,8 @@ def fetch_hf_papers() -> list[dict]:
                 arxiv_id = p.get("id", "")
                 tags = [t.get("id", "") for t in p.get("tags", [])]
                 upvotes = p.get("upvotes", 0) + item.get("numComments", 0)
+                if arxiv_id:
+                    hf_upvotes[arxiv_id] = upvotes  # 전체 저장 (NLP 필터 무관)
                 if title and is_nlp_related(title, tags):
                     papers.append({
                         "title": title,
@@ -108,15 +121,15 @@ def fetch_hf_papers() -> list[dict]:
         except Exception as exc:
             log.warning("HF HTML 파싱 실패: %s", exc)
 
-    log.info("HuggingFace 페이퍼 %d건 수집", len(papers))
-    return papers
+    log.info("HuggingFace 페이퍼 %d건 수집 / upvotes 맵 %d건", len(papers), len(hf_upvotes))
+    return papers, hf_upvotes
 
 
 ARXIV_NS = "{http://www.w3.org/2005/Atom}"
 # cs.CL: NLP 전용 / cs.AI: AI 전반 / cs.LG: 머신러닝
 ARXIV_CATEGORIES = "cat:cs.CL OR cat:cs.AI"
 
-def fetch_arxiv_papers() -> list[dict]:
+def fetch_arxiv_papers(hf_upvotes: dict[str, int] | None = None) -> list[dict]:
     """ArXiv cs.CL 최신 논문을 수집합니다 (HF에 없는 논문 보완용)."""
     log.info("ArXiv 논문 수집 중...")
     try:
@@ -164,17 +177,22 @@ def fetch_arxiv_papers() -> list[dict]:
             continue
         seen.add(arxiv_id)
 
+        # HF에 같은 논문이 있으면 upvotes를 score로 사용, 없으면 0 (최신순)
+        score = (hf_upvotes or {}).get(arxiv_id, 0)
+
         papers.append({
             "title": title,
             "url": f"https://arxiv.org/abs/{arxiv_id}",
             "source_url": "https://arxiv.org/list/cs.CL/recent",
             "arxiv_id": arxiv_id,
-            "score": 0,  # 제출일 순(API 정렬) 사용
+            "score": score,
             "source": "ArXiv cs.CL",
             "abstract": abstract,
         })
 
-    log.info("ArXiv 논문 %d건 수집 (최신순)", len(papers))
+    papers.sort(key=lambda x: x["score"], reverse=True)
+    log.info("ArXiv 논문 %d건 수집 (HF업보트>0: %d건)", len(papers),
+             sum(1 for p in papers if p["score"] > 0))
     return papers
 
 
@@ -342,8 +360,8 @@ def send_to_discord(papers: list[dict]) -> None:
 # ──────────────────────────────────────────────
 
 def main() -> None:
-    hf_papers = fetch_hf_papers()
-    arxiv_papers = fetch_arxiv_papers()
+    hf_papers, hf_upvotes = fetch_hf_papers()
+    arxiv_papers = fetch_arxiv_papers(hf_upvotes)
     papers = merge_papers(hf_papers, arxiv_papers, n=TOP_N)
 
     if not papers:
