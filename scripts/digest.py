@@ -111,46 +111,57 @@ def fetch_hf_papers() -> list[dict]:
     return papers
 
 
+PWC_NLP_TASKS = [
+    "language-modelling",
+    "text-generation",
+    "machine-translation",
+    "question-answering",
+    "text-classification",
+    "named-entity-recognition",
+    "summarization",
+]
+
 def fetch_pwc_papers() -> list[dict]:
-    """Papers With Code API에서 최신 NLP 페이퍼를 수집합니다."""
+    """Papers With Code NLP task별 최신 논문을 수집합니다."""
     log.info("Papers With Code 페이퍼 수집 중...")
     papers: list[dict] = []
     seen: set[str] = set()
 
-    try:
-        resp = requests.get(
-            "https://paperswithcode.com/api/v1/papers/?ordering=-published&page_size=30",
-            headers={"User-Agent": "nlp-digest/1.0"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        for item in resp.json().get("results", []):
-            title: str = item.get("title", "").strip()
-            arxiv_id: str = item.get("arxiv_id", "") or ""
-            abstract: str = item.get("abstract", "") or ""
-            paper_slug: str = item.get("id", "")
-            gh = item.get("github_link") or {}
-            score: int = gh.get("stars", 0)
-
-            if not title or not is_nlp_related(title, tags=None):
+    for task in PWC_NLP_TASKS:
+        try:
+            resp = requests.get(
+                f"https://paperswithcode.com/api/v1/papers/"
+                f"?ordering=-published&page_size=5&task={task}",
+                headers={"User-Agent": "nlp-digest/1.0"},
+                timeout=15,
+            )
+            if not resp.ok:
+                log.warning("PWC task '%s' 응답 %s", task, resp.status_code)
                 continue
+            for item in resp.json().get("results", []):
+                title: str = item.get("title", "").strip()
+                arxiv_id: str = item.get("arxiv_id", "") or ""
+                abstract: str = item.get("abstract", "") or ""
+                paper_slug: str = item.get("id", "")
 
-            key = arxiv_id or title
-            if key in seen:
-                continue
-            seen.add(key)
+                if not title:
+                    continue
+                key = arxiv_id or title
+                if key in seen:
+                    continue
+                seen.add(key)
 
-            papers.append({
-                "title": title,
-                "url": f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else f"https://paperswithcode.com/paper/{paper_slug}",
-                "source_url": f"https://paperswithcode.com/paper/{paper_slug}",
-                "arxiv_id": arxiv_id,
-                "score": score,
-                "source": "Papers With Code",
-                "abstract": abstract,
-            })
-    except Exception as exc:
-        log.warning("Papers With Code 실패: %s", exc)
+                papers.append({
+                    "title": title,
+                    "url": f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else f"https://paperswithcode.com/paper/{paper_slug}",
+                    "source_url": f"https://paperswithcode.com/paper/{paper_slug}",
+                    "arxiv_id": arxiv_id,
+                    "score": 0,
+                    "source": "Papers With Code",
+                    "abstract": abstract,
+                })
+        except Exception as exc:
+            log.warning("PWC task '%s' 실패: %s", task, exc)
 
     log.info("Papers With Code 페이퍼 %d건 수집", len(papers))
     return papers
