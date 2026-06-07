@@ -3,7 +3,7 @@
 
 import os
 import re
-import json
+import time
 import logging
 import requests
 from datetime import date
@@ -160,21 +160,31 @@ def fetch_pwc_papers() -> list[dict]:
 # 2. 병합 및 중복 제거
 # ──────────────────────────────────────────────
 
+HF_CAP = 3  # HF 페이퍼 최대 선택 수 (나머지는 PWC로 채움)
+
 def merge_papers(hf: list[dict], pwc: list[dict], n: int = TOP_N) -> list[dict]:
     seen: set[str] = set()
-    merged: list[dict] = []
+    result: list[dict] = []
 
-    # HF 큐레이션 우선, 이후 PWC 순서로 삽입
-    for p in hf + pwc:
+    # HF 큐레이션 최대 HF_CAP건 우선
+    for p in hf:
+        if len(result) >= HF_CAP:
+            break
         key = p["arxiv_id"] or p["title"]
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(p)
+        if key not in seen:
+            seen.add(key)
+            result.append(p)
 
-    # HF 큐레이션 페이퍼 우선, 그 다음 PWC GitHub 스타 순
-    merged.sort(key=lambda x: (x["source"] != "HuggingFace", -x["score"]))
-    return merged[:n]
+    # 나머지 슬롯은 PWC로 보충
+    for p in pwc:
+        if len(result) >= n:
+            break
+        key = p["arxiv_id"] or p["title"]
+        if key not in seen:
+            seen.add(key)
+            result.append(p)
+
+    return result
 
 
 # ──────────────────────────────────────────────
@@ -226,7 +236,6 @@ def summarize_papers(papers: list[dict]) -> list[dict]:
         try:
             response = model.generate_content(prompt)
             raw = response.text.strip()
-            log.info("Gemini 응답 ('%s'):\n%s", paper["title"][:40], raw[:600])
 
             en, ko, detail_parts = "", "", []
             current = None
@@ -256,71 +265,54 @@ def summarize_papers(papers: list[dict]) -> list[dict]:
 
 
 # ──────────────────────────────────────────────
-# 5. Discord 전송 (Embed 방식)
+# 5. Discord 전송 (논문 1건 = 메시지 1개)
 # ──────────────────────────────────────────────
 
-EMBED_COLOR = 0x5865F2  # Discord Blurple
-
-def build_embeds(papers: list[dict]) -> list[dict]:
-    embeds = []
-    for i, p in enumerate(papers, 1):
-        title = p["title"]
-        if len(title) > 250:
-            title = title[:250] + "…"
-
-        # description: EN / KO / 상세요약
-        desc_parts = [
-            f"🇺🇸 {p['en']}",
-            f"🇰🇷 {p['ko']}",
-        ]
-        detail = p.get("detail", "").strip()
-        if detail:
-            desc_parts += ["", f"📋 **상세 요약**\n{detail}"]
-        description = "\n".join(desc_parts)
-        if len(description) > 4096:
-            description = description[:4093] + "…"
-
-        # 출처 필드: 원본 소스 링크
-        source_value = (
-            f"[{p['source']}]({p['source_url']})"
-            if p.get("source_url")
-            else p["source"]
-        )
-
-        embed: dict = {
-            "title": f"{i}. {title}",  # 제목 클릭 → ArXiv
-            "description": description,
-            "color": EMBED_COLOR,
-            "fields": [
-                {"name": "출처", "value": source_value, "inline": True},
-            ],
-        }
-        if p.get("url"):  # url이 없으면 키 자체를 제외 (Discord가 빈 문자열 거부)
-            embed["url"] = p["url"]
-        embeds.append(embed)
-    return embeds
+def _post(content: str) -> None:
+    resp = requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=15)
+    if not resp.ok:
+        log.error("Discord 오류 %s: %s", resp.status_code, resp.text)
+    resp.raise_for_status()
 
 
 def send_to_discord(papers: list[dict]) -> None:
     today = date.today().strftime("%Y-%m-%d")
-    embeds = build_embeds(papers)
 
-    # Discord: 메시지당 최대 10개 embed, 총 6000자
-    # 5건이면 한 번에 전송 가능하지만 안전하게 5개씩 분할
-    CHUNK = 5
-    for idx in range(0, len(embeds), CHUNK):
-        payload: dict = {"embeds": embeds[idx : idx + CHUNK]}
-        if idx == 0:
-            payload["content"] = f"📚 **NLP Daily Digest — {today}**"
+    _post(f"📚 **NLP Daily Digest — {today}** ({len(papers)}건)")
 
-        log.info("Discord 전송 payload (미리보기):\n%s",
-                 json.dumps(payload, ensure_ascii=False)[:800])
+    for i, p in enumerate(papers, 1):
+        title = p["title"]
+        if len(title) > 180:
+            title = title[:180] + "…"
 
-        resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=15)
-        if not resp.ok:
-            log.error("Discord 오류 %s: %s", resp.status_code, resp.text)
-        resp.raise_for_status()
-        log.info("Discord embed 전송 완료 (%d개)", len(embeds[idx : idx + CHUNK]))
+        detail = p.get("detail", "").strip()
+        arxiv_url = p.get("url", "")
+        source_url = p.get("source_url", "")
+        source = p.get("source", "")
+
+        lines = [
+            f"**{i}. {title}**",
+            f"🇺🇸 {p['en']}",
+            f"🇰🇷 {p['ko']}",
+        ]
+        if detail:
+            lines += ["", "📋 **상세 요약**", detail]
+
+        link_parts = []
+        if arxiv_url:
+            link_parts.append(f"[논문 ArXiv](<{arxiv_url}>)")
+        if source_url:
+            link_parts.append(f"[{source}](<{source_url}>)")
+        if link_parts:
+            lines += ["", " | ".join(link_parts)]
+
+        content = "\n".join(lines)
+        if len(content) > 2000:
+            content = content[:1997] + "…"
+
+        time.sleep(0.5)  # Discord rate limit 방지
+        _post(content)
+        log.info("Discord 전송 완료 — %d/%d (%s)", i, len(papers), source)
 
 
 # ──────────────────────────────────────────────
