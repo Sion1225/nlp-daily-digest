@@ -176,19 +176,23 @@ def fetch_pwc_papers() -> list[dict]:
                     continue
                 seen.add(key)
 
+                gh = item.get("github_link") or {}
+                stars: int = gh.get("stars", 0) or 0
+
                 papers.append({
                     "title": title,
                     "url": f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else f"https://paperswithcode.com/paper/{paper_slug}",
                     "source_url": f"https://paperswithcode.com/paper/{paper_slug}",
                     "arxiv_id": arxiv_id,
-                    "score": 0,
+                    "score": stars,  # GitHub 스타 수 기준
                     "source": "Papers With Code",
                     "abstract": abstract,
                 })
         except Exception as exc:
             log.warning("PWC task '%s' 실패: %s", task, exc)
 
-    log.info("Papers With Code 페이퍼 %d건 수집", len(papers))
+    papers.sort(key=lambda x: x["score"], reverse=True)
+    log.info("Papers With Code 페이퍼 %d건 수집 (GitHub★ 기준 정렬)", len(papers))
     return papers
 
 
