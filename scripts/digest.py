@@ -29,7 +29,6 @@ NLP_KEYWORDS = {
     "vision language", "language understanding", "reading comprehension",
 }
 
-REDDIT_SUBS = ["MachineLearning", "LanguageTechnology", "artificial"]
 ARXIV_RE = re.compile(r"arxiv\.org/abs/([\d.]+v?\d*)")
 
 
@@ -111,50 +110,48 @@ def fetch_hf_papers() -> list[dict]:
     return papers
 
 
-def fetch_reddit_papers() -> list[dict]:
-    """Reddit NLP 관련 서브레딧에서 핫 포스트를 수집합니다."""
-    log.info("Reddit 페이퍼 수집 중...")
+def fetch_pwc_papers() -> list[dict]:
+    """Papers With Code API에서 최신 NLP 페이퍼를 수집합니다."""
+    log.info("Papers With Code 페이퍼 수집 중...")
     papers: list[dict] = []
     seen: set[str] = set()
 
-    for sub in REDDIT_SUBS:
-        try:
-            resp = requests.get(
-                f"https://www.reddit.com/r/{sub}/hot.json?limit=30",
-                headers={"User-Agent": "nlp-digest/1.0"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            for post in resp.json()["data"]["children"]:
-                p = post["data"]
-                title: str = p.get("title", "")
-                url: str = p.get("url", "")
-                score: int = p.get("score", 0)
+    try:
+        resp = requests.get(
+            "https://paperswithcode.com/api/v1/papers/?ordering=-published&page_size=30",
+            headers={"User-Agent": "nlp-digest/1.0"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        for item in resp.json().get("results", []):
+            title: str = item.get("title", "").strip()
+            arxiv_id: str = item.get("arxiv_id", "") or ""
+            abstract: str = item.get("abstract", "") or ""
+            paper_slug: str = item.get("id", "")
+            gh = item.get("github_link") or {}
+            score: int = gh.get("stars", 0)
 
-                if not is_nlp_related(title):
-                    continue
+            if not title or not is_nlp_related(title, tags=None):
+                continue
 
-                m = ARXIV_RE.search(url)
-                arxiv_id = m.group(1) if m else ""
-                key = arxiv_id or title
-                if key in seen:
-                    continue
-                seen.add(key)
+            key = arxiv_id or title
+            if key in seen:
+                continue
+            seen.add(key)
 
-                papers.append({
-                    "title": title,
-                    "url": f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else url,
-                    "source_url": f"https://www.reddit.com{p.get('permalink', '')}",
-                    "arxiv_id": arxiv_id,
-                    "score": score,
-                    "source": f"r/{sub}",
-                    "abstract": "",
-                })
-        except Exception as exc:
-            log.warning("Reddit r/%s 실패: %s", sub, exc)
+            papers.append({
+                "title": title,
+                "url": f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else f"https://paperswithcode.com/paper/{paper_slug}",
+                "source_url": f"https://paperswithcode.com/paper/{paper_slug}",
+                "arxiv_id": arxiv_id,
+                "score": score,
+                "source": "Papers With Code",
+                "abstract": abstract,
+            })
+    except Exception as exc:
+        log.warning("Papers With Code 실패: %s", exc)
 
-    papers.sort(key=lambda x: x["score"], reverse=True)
-    log.info("Reddit 페이퍼 %d건 수집", len(papers))
+    log.info("Papers With Code 페이퍼 %d건 수집", len(papers))
     return papers
 
 
@@ -162,19 +159,19 @@ def fetch_reddit_papers() -> list[dict]:
 # 2. 병합 및 중복 제거
 # ──────────────────────────────────────────────
 
-def merge_papers(hf: list[dict], reddit: list[dict], n: int = TOP_N) -> list[dict]:
+def merge_papers(hf: list[dict], pwc: list[dict], n: int = TOP_N) -> list[dict]:
     seen: set[str] = set()
     merged: list[dict] = []
 
-    # HF 페이퍼 우선, 이후 Reddit 순서로 삽입
-    for p in hf + reddit:
+    # HF 큐레이션 우선, 이후 PWC 순서로 삽입
+    for p in hf + pwc:
         key = p["arxiv_id"] or p["title"]
         if key in seen:
             continue
         seen.add(key)
         merged.append(p)
 
-    # HF 큐레이션 페이퍼 우선, 그 다음 Reddit 점수 순
+    # HF 큐레이션 페이퍼 우선, 그 다음 PWC GitHub 스타 순
     merged.sort(key=lambda x: (x["source"] != "HuggingFace", -x["score"]))
     return merged[:n]
 
@@ -261,9 +258,9 @@ def build_message(papers: list[dict]) -> str:
         else:
             abstract_line = None
 
-        paper_link = f"[논문 (ArXiv)]({p['url']})" if p.get("url") else ""
-        source_link = f"[{p['source']}]({p['source_url']})" if p.get("source_url") else p['source']
-        link_line = f"> {paper_link}  |  출처: {source_link}"
+        paper_link = f"[ArXiv]({p['url']})" if p.get("url") else ""
+        source_link = f"[{p['source']}]({p['source_url']})" if p.get("source_url") else p["source"]
+        link_line = f"> 논문: {paper_link}  |  출처: {source_link}"
 
         block = [
             f"**{i}. {title}**",
@@ -307,8 +304,8 @@ def send_to_discord(message: str) -> None:
 
 def main() -> None:
     hf_papers = fetch_hf_papers()
-    reddit_papers = fetch_reddit_papers()
-    papers = merge_papers(hf_papers, reddit_papers, n=TOP_N)
+    pwc_papers = fetch_pwc_papers()
+    papers = merge_papers(hf_papers, pwc_papers, n=TOP_N)
 
     if not papers:
         log.error("수집된 페이퍼가 없습니다. 종료합니다.")
