@@ -112,6 +112,7 @@ def fetch_hf_papers() -> list[dict]:
 
 
 PWC_NLP_TASKS = [
+    # ── 고전 NLP ──────────────────────────────
     "language-modelling",
     "text-generation",
     "machine-translation",
@@ -119,6 +120,30 @@ PWC_NLP_TASKS = [
     "text-classification",
     "named-entity-recognition",
     "summarization",
+    "sentiment-analysis",
+    "relation-extraction",
+    "coreference-resolution",
+    "natural-language-inference",
+    "reading-comprehension",
+    "open-domain-question-answering",
+    "semantic-textual-similarity",
+    "fact-checking",
+    # ── 대화 / 생성 ───────────────────────────
+    "dialogue-generation",
+    "code-generation",
+    "data-to-text-generation",
+    # ── 추론 / 지식 ───────────────────────────
+    "commonsense-reasoning",
+    "mathematical-reasoning",
+    "knowledge-base-question-answering",
+    # ── 모델 펀더멘탈 ─────────────────────────
+    "language-model-pretraining",
+    "few-shot-learning",
+    "zero-shot-learning",
+    "transfer-learning",
+    "knowledge-distillation",
+    "model-compression",
+    "word-embeddings",
 ]
 
 def fetch_pwc_papers() -> list[dict]:
