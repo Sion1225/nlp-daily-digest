@@ -213,28 +213,39 @@ def summarize_papers(papers: list[dict]) -> list[dict]:
         abstract_block = f"Abstract: {abstract[:800]}" if abstract else ""
 
         prompt = (
-            "You are an expert NLP researcher writing a concise daily digest.\n\n"
+            "You are an expert NLP researcher writing a daily digest for Korean ML practitioners.\n\n"
             f"Paper title: {paper['title']}\n"
             f"{abstract_block}\n\n"
-            "Write exactly two lines and nothing else:\n"
+            "Write exactly these three sections and nothing else:\n"
             "EN: [One English sentence capturing the key contribution]\n"
-            "KO: [같은 내용을 한국어 한 문장으로 작성]"
+            "KO: [같은 내용을 한국어 한 문장으로 작성]\n"
+            "DETAIL: [핵심 방법론, 실험 결과, 의의를 포함하여 3~4문장으로 한국어로 상세히 설명]"
         )
 
         try:
             response = model.generate_content(prompt)
-            en, ko = "", ""
+            en, ko, detail_parts = "", "", []
+            current = None
             for line in response.text.strip().splitlines():
                 if line.startswith("EN:"):
+                    current = "en"
                     en = line[3:].strip()
                 elif line.startswith("KO:"):
+                    current = "ko"
                     ko = line[3:].strip()
+                elif line.startswith("DETAIL:"):
+                    current = "detail"
+                    detail_parts.append(line[7:].strip())
+                elif current == "detail" and line.strip():
+                    detail_parts.append(line.strip())
             paper["en"] = en or paper["title"]
             paper["ko"] = ko or paper["title"]
+            paper["detail"] = " ".join(detail_parts)
         except Exception as exc:
             log.warning("Gemini 요약 실패 ('%s'): %s", paper["title"][:40], exc)
             paper["en"] = paper["title"]
             paper["ko"] = paper["title"]
+            paper["detail"] = paper.get("abstract", "")[:300]
 
     return papers
 
@@ -251,25 +262,18 @@ def build_message(papers: list[dict]) -> str:
         if len(title) > 110:
             title = title[:110] + "…"
 
-        abstract = p.get("abstract", "")
-        if abstract:
-            abstract_preview = abstract[:220] + ("…" if len(abstract) > 220 else "")
-            abstract_line = f"> :notepad_spiral: {abstract_preview}"
-        else:
-            abstract_line = None
-
+        detail = p.get("detail", "").strip()
         paper_link = f"[ArXiv]({p['url']})" if p.get("url") else ""
         source_link = f"[{p['source']}]({p['source_url']})" if p.get("source_url") else p["source"]
-        link_line = f"> 논문: {paper_link}  |  출처: {source_link}"
 
         block = [
             f"**{i}. {title}**",
             f"> :flag_us: {p['en']}",
             f"> :flag_kr: {p['ko']}",
         ]
-        if abstract_line:
-            block.append(abstract_line)
-        block += [link_line, ""]
+        if detail:
+            block.append(f"> :notepad_spiral: {detail}")
+        block += [f"> 논문: {paper_link}  |  출처: {source_link}", ""]
         lines += block
 
     return "\n".join(lines)
