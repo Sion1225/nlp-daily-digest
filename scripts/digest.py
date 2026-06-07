@@ -251,55 +251,64 @@ def summarize_papers(papers: list[dict]) -> list[dict]:
 
 
 # ──────────────────────────────────────────────
-# 5. Discord 전송
+# 5. Discord 전송 (Embed 방식)
 # ──────────────────────────────────────────────
 
-def build_message(papers: list[dict]) -> str:
-    today = date.today().strftime("%Y-%m-%d")
-    lines = [f"**:books: NLP Daily Digest — {today}**", ""]
+EMBED_COLOR = 0x5865F2  # Discord Blurple
+
+def build_embeds(papers: list[dict]) -> list[dict]:
+    embeds = []
     for i, p in enumerate(papers, 1):
         title = p["title"]
-        if len(title) > 110:
-            title = title[:110] + "…"
+        if len(title) > 250:
+            title = title[:250] + "…"
 
-        detail = p.get("detail", "").strip()
-        paper_link = f"[ArXiv]({p['url']})" if p.get("url") else ""
-        source_link = f"[{p['source']}]({p['source_url']})" if p.get("source_url") else p["source"]
-
-        block = [
-            f"**{i}. {title}**",
-            f"> :flag_us: {p['en']}",
-            f"> :flag_kr: {p['ko']}",
+        # description: EN / KO / 상세요약
+        desc_parts = [
+            f"🇺🇸 {p['en']}",
+            f"🇰🇷 {p['ko']}",
         ]
+        detail = p.get("detail", "").strip()
         if detail:
-            block.append(f"> :notepad_spiral: {detail}")
-        block += [f"> 논문: {paper_link}  |  출처: {source_link}", ""]
-        lines += block
+            desc_parts += ["", f"📋 **상세 요약**\n{detail}"]
+        description = "\n".join(desc_parts)
+        if len(description) > 4096:
+            description = description[:4093] + "…"
 
-    return "\n".join(lines)
-
-
-def send_to_discord(message: str) -> None:
-    # Discord 메시지 최대 2000자 → 초과 시 분할
-    chunks: list[str] = []
-    while message:
-        if len(message) <= 2000:
-            chunks.append(message)
-            break
-        cut = message.rfind("\n", 0, 2000)
-        if cut == -1:
-            cut = 2000
-        chunks.append(message[:cut])
-        message = message[cut:].lstrip()
-
-    for chunk in chunks:
-        resp = requests.post(
-            DISCORD_WEBHOOK_URL,
-            json={"content": chunk},
-            timeout=15,
+        # 출처 필드: 원본 소스 링크
+        source_value = (
+            f"[{p['source']}]({p['source_url']})"
+            if p.get("source_url")
+            else p["source"]
         )
+
+        embed: dict = {
+            "title": f"{i}. {title}",  # 제목 클릭 → ArXiv
+            "url": p.get("url", ""),
+            "description": description,
+            "color": EMBED_COLOR,
+            "fields": [
+                {"name": "출처", "value": source_value, "inline": True},
+            ],
+        }
+        embeds.append(embed)
+    return embeds
+
+
+def send_to_discord(papers: list[dict]) -> None:
+    today = date.today().strftime("%Y-%m-%d")
+    embeds = build_embeds(papers)
+
+    # Discord: 메시지당 최대 10개 embed, 총 6000자
+    # 5건이면 한 번에 전송 가능하지만 안전하게 5개씩 분할
+    CHUNK = 5
+    for idx in range(0, len(embeds), CHUNK):
+        payload: dict = {"embeds": embeds[idx : idx + CHUNK]}
+        if idx == 0:
+            payload["content"] = f"📚 **NLP Daily Digest — {today}**"
+        resp = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=15)
         resp.raise_for_status()
-        log.info("Discord 전송 완료 (%d자)", len(chunk))
+        log.info("Discord embed 전송 완료 (%d개)", len(embeds[idx : idx + CHUNK]))
 
 
 # ──────────────────────────────────────────────
@@ -317,8 +326,7 @@ def main() -> None:
 
     log.info("최종 선정 페이퍼 %d건", len(papers))
     papers = summarize_papers(papers)
-    message = build_message(papers)
-    send_to_discord(message)
+    send_to_discord(papers)
     log.info("완료!")
 
 
