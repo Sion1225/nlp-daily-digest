@@ -7,7 +7,7 @@ import time
 import logging
 import requests
 import xml.etree.ElementTree as ET
-from datetime import date
+from datetime import date, timedelta
 from bs4 import BeautifulSoup
 import google.generativeai as genai
 
@@ -56,8 +56,15 @@ def is_nlp_related(title: str, tags: list[str] | None = None) -> bool:
 # ──────────────────────────────────────────────
 
 def fetch_hf_papers() -> tuple[list[dict], dict[str, int]]:
-    """HuggingFace 데일리 페이퍼 + arxiv_id→upvotes 맵을 반환합니다."""
-    log.info("HuggingFace 페이퍼 수집 중...")
+    """HuggingFace 전날 데일리 페이퍼 + arxiv_id→upvotes 맵을 반환합니다.
+
+    전날(UTC) 페이퍼를 사용하는 이유:
+    스크립트는 00:00 UTC에 실행되는데, 당일 페이퍼는 방금 올라와
+    업보트가 거의 없다. 전날 페이퍼는 하루 치 업보트가 쌓여 있어
+    실제 화제도를 반영한다.
+    """
+    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    log.info("HuggingFace 페이퍼 수집 중... (날짜: %s)", yesterday)
     papers: list[dict] = []
     hf_upvotes: dict[str, int] = {}  # arxiv_id → upvotes (ArXiv 교차참조용)
 
@@ -65,6 +72,7 @@ def fetch_hf_papers() -> tuple[list[dict], dict[str, int]]:
     try:
         resp = requests.get(
             "https://huggingface.co/api/daily_papers",
+            params={"date": yesterday},
             headers={"User-Agent": "nlp-digest/1.0"},
             timeout=15,
         )
@@ -94,7 +102,7 @@ def fetch_hf_papers() -> tuple[list[dict], dict[str, int]]:
     if not papers:
         try:
             resp = requests.get(
-                "https://huggingface.co/papers",
+                f"https://huggingface.co/papers?date={yesterday}",
                 headers={"User-Agent": "Mozilla/5.0 (compatible; nlp-digest/1.0)"},
                 timeout=15,
             )
@@ -316,9 +324,9 @@ def _post(content: str) -> None:
 
 
 def send_to_discord(papers: list[dict]) -> None:
-    today = date.today().strftime("%Y-%m-%d")
+    yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    _post(f"📚 **NLP Daily Digest — {today}** ({len(papers)}건)")
+    _post(f"📚 **NLP Daily Digest — {yesterday}** ({len(papers)}건)")
 
     for i, p in enumerate(papers, 1):
         title = p["title"]
