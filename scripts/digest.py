@@ -363,7 +363,14 @@ def send_to_discord(papers: list[dict]) -> None:
 
     _post(f"📚 **NLP Daily Digest — {yesterday}** ({len(papers)}건)")
 
+    prev_window = None
     for i, p in enumerate(papers, 1):
+        cur_window = p.get("window")
+        if prev_window and cur_window != prev_window:
+            time.sleep(0.5)
+            _post("─" * 30)
+        prev_window = cur_window
+
         title = p["title"]
         if len(title) > 180:
             title = title[:180] + "…"
