@@ -6,6 +6,7 @@ import re
 import time
 import logging
 import requests
+import xml.etree.ElementTree as ET
 from datetime import date
 from bs4 import BeautifulSoup
 import google.generativeai as genai
@@ -111,88 +112,69 @@ def fetch_hf_papers() -> list[dict]:
     return papers
 
 
-PWC_NLP_TASKS = [
-    # ── 고전 NLP ──────────────────────────────
-    "language-modelling",
-    "text-generation",
-    "machine-translation",
-    "question-answering",
-    "text-classification",
-    "named-entity-recognition",
-    "summarization",
-    "sentiment-analysis",
-    "relation-extraction",
-    "coreference-resolution",
-    "natural-language-inference",
-    "reading-comprehension",
-    "open-domain-question-answering",
-    "semantic-textual-similarity",
-    "fact-checking",
-    # ── 대화 / 생성 ───────────────────────────
-    "dialogue-generation",
-    "code-generation",
-    "data-to-text-generation",
-    # ── 추론 / 지식 ───────────────────────────
-    "commonsense-reasoning",
-    "mathematical-reasoning",
-    "knowledge-base-question-answering",
-    # ── 모델 펀더멘탈 ─────────────────────────
-    "language-model-pretraining",
-    "few-shot-learning",
-    "zero-shot-learning",
-    "transfer-learning",
-    "knowledge-distillation",
-    "model-compression",
-    "word-embeddings",
-]
+ARXIV_NS = "{http://www.w3.org/2005/Atom}"
+# cs.CL: NLP 전용 / cs.AI: AI 전반 / cs.LG: 머신러닝
+ARXIV_CATEGORIES = "cat:cs.CL OR cat:cs.AI"
 
-def fetch_pwc_papers() -> list[dict]:
-    """Papers With Code NLP task별 최신 논문을 수집합니다."""
-    log.info("Papers With Code 페이퍼 수집 중...")
+def fetch_arxiv_papers() -> list[dict]:
+    """ArXiv cs.CL 최신 논문을 수집합니다 (HF에 없는 논문 보완용)."""
+    log.info("ArXiv 논문 수집 중...")
+    try:
+        resp = requests.get(
+            "http://export.arxiv.org/api/query",
+            params={
+                "search_query": ARXIV_CATEGORIES,
+                "sortBy": "submittedDate",
+                "sortOrder": "descending",
+                "max_results": 40,
+            },
+            headers={"User-Agent": "nlp-digest/1.0"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        log.warning("ArXiv 수집 실패: %s", exc)
+        return []
+
     papers: list[dict] = []
     seen: set[str] = set()
 
-    for task in PWC_NLP_TASKS:
-        try:
-            resp = requests.get(
-                f"https://paperswithcode.com/api/v1/papers/"
-                f"?ordering=-published&page_size=5&task={task}",
-                headers={"User-Agent": "nlp-digest/1.0"},
-                timeout=15,
-            )
-            if not resp.ok:
-                log.warning("PWC task '%s' 응답 %s", task, resp.status_code)
-                continue
-            for item in resp.json().get("results", []):
-                title: str = item.get("title", "").strip()
-                arxiv_id: str = item.get("arxiv_id", "") or ""
-                abstract: str = item.get("abstract", "") or ""
-                paper_slug: str = item.get("id", "")
+    try:
+        root = ET.fromstring(resp.content)
+    except ET.ParseError as exc:
+        log.warning("ArXiv XML 파싱 실패: %s", exc)
+        return []
 
-                if not title:
-                    continue
-                key = arxiv_id or title
-                if key in seen:
-                    continue
-                seen.add(key)
+    for entry in root.findall(f"{ARXIV_NS}entry"):
+        title_el  = entry.find(f"{ARXIV_NS}title")
+        summary_el = entry.find(f"{ARXIV_NS}summary")
+        id_el     = entry.find(f"{ARXIV_NS}id")
+        if title_el is None or id_el is None:
+            continue
 
-                gh = item.get("github_link") or {}
-                stars: int = gh.get("stars", 0) or 0
+        title    = title_el.text.strip().replace("\n", " ")
+        abstract = (summary_el.text or "").strip().replace("\n", " ") if summary_el is not None else ""
+        arxiv_url = id_el.text.strip()
+        # URL 형식: http://arxiv.org/abs/2406.12345v2 → 2406.12345
+        arxiv_id  = re.sub(r"v\d+$", "", arxiv_url.split("/abs/")[-1])
 
-                papers.append({
-                    "title": title,
-                    "url": f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else f"https://paperswithcode.com/paper/{paper_slug}",
-                    "source_url": f"https://paperswithcode.com/paper/{paper_slug}",
-                    "arxiv_id": arxiv_id,
-                    "score": stars,  # GitHub 스타 수 기준
-                    "source": "Papers With Code",
-                    "abstract": abstract,
-                })
-        except Exception as exc:
-            log.warning("PWC task '%s' 실패: %s", task, exc)
+        if not is_nlp_related(title):
+            continue
+        if arxiv_id in seen:
+            continue
+        seen.add(arxiv_id)
 
-    papers.sort(key=lambda x: x["score"], reverse=True)
-    log.info("Papers With Code 페이퍼 %d건 수집 (GitHub★ 기준 정렬)", len(papers))
+        papers.append({
+            "title": title,
+            "url": f"https://arxiv.org/abs/{arxiv_id}",
+            "source_url": "https://arxiv.org/list/cs.CL/recent",
+            "arxiv_id": arxiv_id,
+            "score": 0,  # 제출일 순(API 정렬) 사용
+            "source": "ArXiv cs.CL",
+            "abstract": abstract,
+        })
+
+    log.info("ArXiv 논문 %d건 수집 (최신순)", len(papers))
     return papers
 
 
@@ -202,7 +184,7 @@ def fetch_pwc_papers() -> list[dict]:
 
 HF_CAP = 3  # HF 페이퍼 최대 선택 수 (나머지는 PWC로 채움)
 
-def merge_papers(hf: list[dict], pwc: list[dict], n: int = TOP_N) -> list[dict]:
+def merge_papers(hf: list[dict], arxiv: list[dict], n: int = TOP_N) -> list[dict]:
     seen: set[str] = set()
     result: list[dict] = []
 
@@ -215,8 +197,8 @@ def merge_papers(hf: list[dict], pwc: list[dict], n: int = TOP_N) -> list[dict]:
             seen.add(key)
             result.append(p)
 
-    # 나머지 슬롯은 PWC로 보충
-    for p in pwc:
+    # 나머지 슬롯은 ArXiv 최신 논문으로 보충
+    for p in arxiv:
         if len(result) >= n:
             break
         key = p["arxiv_id"] or p["title"]
@@ -361,8 +343,8 @@ def send_to_discord(papers: list[dict]) -> None:
 
 def main() -> None:
     hf_papers = fetch_hf_papers()
-    pwc_papers = fetch_pwc_papers()
-    papers = merge_papers(hf_papers, pwc_papers, n=TOP_N)
+    arxiv_papers = fetch_arxiv_papers()
+    papers = merge_papers(hf_papers, arxiv_papers, n=TOP_N)
 
     if not papers:
         log.error("수집된 페이퍼가 없습니다. 종료합니다.")
