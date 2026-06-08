@@ -2,7 +2,7 @@ name: NLP Daily Digest
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 09:00 KST (UTC+9)
+    - cron: '0 21 * * *'  # 06:00 KST (UTC+9), 지연 감안
   workflow_dispatch:       # 수동 실행 허용
 
 jobs:
