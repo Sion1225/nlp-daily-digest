@@ -103,6 +103,7 @@ def _fetch_hf_day(date_str: str) -> tuple[list[dict], dict[str, int]]:
         log.warning("HF API 실패 (%s): %s", date_str, exc)
 
     if not papers:
+        log.warning("HF API 빈 결과 (%s), HTML 폴백 시도...", date_str)
         try:
             resp = requests.get(
                 f"https://huggingface.co/papers?date={date_str}",
@@ -134,12 +135,16 @@ def _fetch_hf_day(date_str: str) -> tuple[list[dict], dict[str, int]]:
 
 
 def fetch_hf_daily() -> tuple[list[dict], dict[str, int]]:
-    """어제 HF papers (일간 핫 논문)."""
-    d = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-    log.info("HF 일간 수집 (%s)...", d)
-    papers, upvotes = _fetch_hf_day(d)
-    papers.sort(key=lambda x: x["score"], reverse=True)
-    log.info("HF 일간 %d건", len(papers))
+    """어제 HF papers (일간 핫 논문). API 빈 결과 시 최대 3일 전까지 재시도."""
+    for days_back in range(1, 4):
+        d = (date.today() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        log.info("HF 일간 수집 (%s)...", d)
+        papers, upvotes = _fetch_hf_day(d)
+        papers.sort(key=lambda x: x["score"], reverse=True)
+        log.info("HF 일간 %d건 (%s 기준)", len(papers), d)
+        if any(p["score"] > 0 for p in papers):
+            return papers, upvotes
+        log.warning("HF 일간 upvotes 없음 (%s), 이전 날짜 재시도...", d)
     return papers, upvotes
 
 
