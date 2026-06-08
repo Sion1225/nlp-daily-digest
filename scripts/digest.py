@@ -85,6 +85,8 @@ def _fetch_hf_day(date_str: str) -> tuple[list[dict], dict[str, int]]:
                 arxiv_id = p.get("id", "")
                 tags = [t.get("id", "") for t in p.get("tags", [])]
                 score = p.get("upvotes", 0) + item.get("numComments", 0)
+                log.info("HF paper: %s upvotes=%s comments=%s → score=%s",
+                         arxiv_id, p.get("upvotes"), item.get("numComments"), score)
                 if arxiv_id:
                     upvotes[arxiv_id] = score
                 if title and is_nlp_related(title, tags):
@@ -405,7 +407,7 @@ def send_to_discord(papers: list[dict]) -> None:
 
         time.sleep(0.5)  # Discord rate limit 방지
         _post(content)
-        log.info("Discord 전송 완료 — %d/%d (%s)", i, len(papers), source)
+        log.info("Discord 전송 완료 — %d/%d (%s) score=%s", i, len(papers), source, p.get("score"))
 
 
 # ──────────────────────────────────────────────
